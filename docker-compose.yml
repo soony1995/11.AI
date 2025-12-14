@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  # PostgreSQL + pgvector
+  ai-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ai-postgres
+    environment:
+      POSTGRES_USER: ai
+      POSTGRES_PASSWORD: ai_password
+      POSTGRES_DB: ai_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - ai_postgres_data:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+    networks:
+      - 10_modules
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai -d ai_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # AI Worker (Python)
+  ai-worker:
+    build:
+      context: ./ai-worker
+      dockerfile: Dockerfile
+    container_name: ai-worker
+    environment:
+      DATABASE_URL: postgres://ai:ai_password@ai-postgres:5432/ai_db
+      REDIS_URL: redis://media-redis:6379
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minio
+      MINIO_SECRET_KEY: minio123
+      MINIO_BUCKET: media-uploads
+    depends_on:
+      ai-postgres:
+        condition: service_healthy
+    networks:
+      - 10_modules
+    restart: unless-stopped
+
+  # Person API (FastAPI)
+  person-api:
+    build:
+      context: ./person-api
+      dockerfile: Dockerfile
+    container_name: person-api
+    ports:
+      - "5001:5000"
+    environment:
+      DATABASE_URL: postgres://ai:ai_password@ai-postgres:5432/ai_db
+      REDIS_URL: redis://media-redis:6379
+    depends_on:
+      ai-postgres:
+        condition: service_healthy
+    networks:
+      - 10_modules
+    restart: unless-stopped
+
+networks:
+  10_modules:
+    external: true
+
+volumes:
+  ai_postgres_data:
