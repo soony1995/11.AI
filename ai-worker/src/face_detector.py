@@ -61,5 +61,5 @@ class FaceDetector:
     
     def _load_image(self, image_bytes: bytes) -> np.ndarray:
         """Load image bytes into numpy array"""
-        image = Image.open(io.BytesIO(image_bytes))
+        image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
         return np.array(image)

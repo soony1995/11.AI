@@ -2,6 +2,7 @@
 Person API - FastAPI application
 """
 import os
+import json
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -9,10 +10,14 @@ from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import redis
 
 app = FastAPI(title="Person API", version="1.0.0")
 
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgres://ai:ai_password@localhost:5433/ai_db')
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
+CHANNEL_PHOTO_REINDEX = 'photo:reindex'
+redis_client = redis.from_url(REDIS_URL)
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
@@ -174,7 +179,14 @@ def assign_face_to_person(face_id: str, data: FaceAssign, x_user_id: str = Heade
             """, (str(uuid.uuid4()), result['media_id'], data.person_id, face_id))
             
             conn.commit()
-            return {"message": "Face assigned", "person_id": data.person_id}
+            try:
+                redis_client.publish(CHANNEL_PHOTO_REINDEX, json.dumps({
+                    'mediaId': result['media_id'],
+                }))
+            except Exception as e:
+                print(f"[Person API] Failed to publish reindex event: {e}")
+
+            return {"message": "Face assigned", "person_id": data.person_id, "media_id": result['media_id']}
     finally:
         conn.close()
 

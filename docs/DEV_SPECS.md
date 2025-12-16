@@ -37,6 +37,7 @@
 |:---|:---|:---|:---|
 | `photo:uploaded` | 02.Media | 11.AI | 사진 분석 요청 |
 | `photo:analyzed` | 11.AI | 03.Search | 분석 완료 알림 |
+| `photo:reindex` | 11.AI(Person API) | 03.Search | 얼굴-인물 매핑 변경 후 재인덱싱 |
 
 ---
 

@@ -22,6 +22,8 @@ cd ../11.AI
 docker compose up --build
 ```
 
+`ai-worker`는 02.Media의 MinIO 컨테이너(`media-minio:9000`)에서 이미지를 다운로드한다.
+
 ## 서비스
 
 | 서비스 | 포트 | 설명 |
@@ -44,6 +46,8 @@ docker compose up --build
 | GET | /faces/unassigned | 미확인 얼굴 목록 |
 | POST | /faces/:faceId/assign | 얼굴에 인물 할당 |
 | GET | /analysis/:mediaId | 분석 상태 조회 |
+
+`/faces/:faceId/assign`로 얼굴-인물 매핑을 변경하면 Redis로 `photo:reindex` 이벤트를 발행하여 03.Search가 Elasticsearch 문서를 다시 인덱싱한다.
 
 ## 흐름
 

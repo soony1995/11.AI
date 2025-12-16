@@ -31,10 +31,12 @@ services:
     environment:
       DATABASE_URL: postgres://ai:ai_password@ai-postgres:5432/ai_db
       REDIS_URL: redis://media-redis:6379
-      MINIO_ENDPOINT: http://minio:9000
+      # MinIO is provided by 02.Media as `media-minio` on the shared `10_modules` network.
+      MINIO_ENDPOINT: http://media-minio:9000
       MINIO_ACCESS_KEY: minio
       MINIO_SECRET_KEY: minio123
       MINIO_BUCKET: media-uploads
+      PYTHONUNBUFFERED: "1"
     depends_on:
       ai-postgres:
         condition: service_healthy
