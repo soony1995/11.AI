@@ -3,6 +3,7 @@ Database operations for AI Worker
 Uses pgvector for face embedding similarity search
 """
 import uuid
+import os
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -81,27 +82,68 @@ class Database:
         return face_id
     
     def find_similar_face(self, embedding: list, owner_id: str, 
-                          threshold: float = 0.6) -> str | None:
+                          distance_threshold: float = 0.5,
+                          min_confirmed_samples: int = 2,
+                          distance_ratio: float = 0.85) -> str | None:
         """
-        Find similar face in database using cosine similarity
+        Find similar face in database using confirmed samples only.
+        Uses L2 distance (<->) to match face_recognition's typical tolerance scale.
         Returns person_id if found, None otherwise
         """
+        threshold = float(os.getenv('AUTO_MATCH_DISTANCE_THRESHOLD', distance_threshold))
+        min_samples = int(os.getenv('AUTO_MATCH_MIN_CONFIRMED', min_confirmed_samples))
+        ratio = float(os.getenv('AUTO_MATCH_DISTANCE_RATIO', distance_ratio))
+        allow_single = os.getenv('AUTO_MATCH_ALLOW_SINGLE_PERSON', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+        if min_samples < 1:
+            min_samples = 1
+        if ratio <= 0 or ratio > 1:
+            ratio = distance_ratio
+
         with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Use pgvector cosine distance (<=>)
             cur.execute("""
-                SELECT fe.person_id, 
-                       1 - (fe.embedding <=> %s::vector) as similarity
-                FROM face_embeddings fe
-                JOIN persons p ON fe.person_id = p.id
-                WHERE p.owner_id = %s
-                  AND fe.person_id IS NOT NULL
-                ORDER BY fe.embedding <=> %s::vector
-                LIMIT 1
-            """, (embedding, owner_id, embedding))
+                WITH eligible_persons AS (
+                    SELECT pp.person_id
+                    FROM photo_persons pp
+                    JOIN persons p ON pp.person_id = p.id
+                    WHERE p.owner_id = %s
+                      AND pp.confirmed = true
+                      AND pp.face_embedding_id IS NOT NULL
+                    GROUP BY pp.person_id
+                    HAVING COUNT(*) >= %s
+                ),
+                person_distances AS (
+                    SELECT pp.person_id,
+                           MIN(fe.embedding <-> %s::vector) as min_distance
+                    FROM photo_persons pp
+                    JOIN eligible_persons ep ON ep.person_id = pp.person_id
+                    JOIN face_embeddings fe ON fe.id = pp.face_embedding_id
+                    WHERE pp.confirmed = true
+                    GROUP BY pp.person_id
+                )
+                SELECT person_id, min_distance
+                FROM person_distances
+                ORDER BY min_distance ASC
+                LIMIT 2
+            """, (owner_id, min_samples, embedding))
             
-            result = cur.fetchone()
-            if result and result['similarity'] >= (1 - threshold):
-                return result['person_id']
+            results = cur.fetchall()
+            if not results:
+                return None
+
+            if len(results) == 1 and not allow_single:
+                return None
+
+            best = results[0]
+            best_distance = float(best['min_distance']) if best['min_distance'] is not None else None
+            if best_distance is None or best_distance > threshold:
+                return None
+
+            if len(results) > 1 and results[1]['min_distance'] is not None:
+                second_distance = float(results[1]['min_distance'])
+                if best_distance > second_distance * ratio:
+                    return None
+
+            return best['person_id']
             return None
     
     def link_photo_person(self, media_id: str, person_id: str, 

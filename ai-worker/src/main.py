@@ -13,6 +13,8 @@ from .storage import StorageClient
 # Configuration
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgres://ai:ai_password@localhost:5433/ai_db')
+AUTO_MATCH_DISTANCE_THRESHOLD = float(os.getenv('AUTO_MATCH_DISTANCE_THRESHOLD', '0.5'))
+AUTO_MATCH_MIN_CONFIRMED = int(os.getenv('AUTO_MATCH_MIN_CONFIRMED', '2'))
 
 # Redis channels
 CHANNEL_PHOTO_UPLOADED = 'photo:uploaded'
@@ -57,21 +59,25 @@ def main():
             exif_data = exif_parser.parse(image_bytes)
             
             # Step 2: Detect faces
-            faces = face_detector.detect_faces(image_bytes)
-            embeddings = face_detector.get_embeddings(image_bytes)
+            faces, embeddings = face_detector.detect_faces_and_embeddings(image_bytes)
             
             # Step 3: Save face embeddings and match with existing persons
             face_count = 0
             for i, (face, embedding) in enumerate(zip(faces, embeddings)):
                 # Check for similar faces
-                similar_person = db.find_similar_face(embedding, owner_id)
+                similar_person = db.find_similar_face(
+                    embedding.tolist(),
+                    owner_id,
+                    distance_threshold=AUTO_MATCH_DISTANCE_THRESHOLD,
+                    min_confirmed_samples=AUTO_MATCH_MIN_CONFIRMED,
+                )
                 
                 # Save face embedding
                 face_id = db.save_face_embedding(
                     media_id=media_id,
                     embedding=embedding.tolist(),
                     bbox=face,
-                    person_id=similar_person
+                    person_id=None
                 )
                 
                 if similar_person:

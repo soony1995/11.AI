@@ -18,9 +18,27 @@ DATABASE_URL = os.getenv('DATABASE_URL', 'postgres://ai:ai_password@localhost:54
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379')
 CHANNEL_PHOTO_REINDEX = 'photo:reindex'
 redis_client = redis.from_url(REDIS_URL)
+_ignored_faces_table_ready = False
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
+
+def ensure_ignored_faces_table(conn):
+    global _ignored_faces_table_ready
+    if _ignored_faces_table_ready:
+        return
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ignored_faces (
+                id UUID PRIMARY KEY,
+                owner_id UUID NOT NULL,
+                face_embedding_id UUID NOT NULL REFERENCES face_embeddings(id) ON DELETE CASCADE,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(owner_id, face_embedding_id)
+            );
+        """)
+    conn.commit()
+    _ignored_faces_table_ready = True
 
 # --- Models ---
 
@@ -133,19 +151,70 @@ def delete_person(person_id: str, x_user_id: str = Header(...)):
 
 @app.get("/faces/unassigned")
 def list_unassigned_faces(x_user_id: str = Header(...)):
-    """List faces that haven't been assigned to a person"""
+    """List faces that haven't been confirmed as belonging to a person"""
     conn = get_db()
     try:
+        ensure_ignored_faces_table(conn)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT fe.id, fe.media_id, fe.bbox_x, fe.bbox_y, 
-                       fe.bbox_width, fe.bbox_height, fe.created_at
+                SELECT
+                       fe.id, fe.media_id, fe.bbox_x, fe.bbox_y,
+                       fe.bbox_width, fe.bbox_height, fe.created_at,
+                       spp.person_id as suggested_person_id,
+                       sp.name as suggested_person_name
                 FROM face_embeddings fe
                 JOIN analysis_results ar ON fe.media_id = ar.media_id
-                WHERE ar.owner_id = %s AND fe.person_id IS NULL
+                LEFT JOIN photo_persons cpp
+                  ON cpp.face_embedding_id = fe.id AND cpp.confirmed = true
+                LEFT JOIN ignored_faces ig
+                  ON ig.face_embedding_id = fe.id AND ig.owner_id = ar.owner_id
+                LEFT JOIN LATERAL (
+                  SELECT pp.person_id
+                  FROM photo_persons pp
+                  WHERE pp.face_embedding_id = fe.id AND pp.confirmed = false
+                  ORDER BY pp.created_at DESC
+                  LIMIT 1
+                ) spp ON true
+                LEFT JOIN persons sp
+                  ON sp.id = spp.person_id
+                WHERE ar.owner_id = %s
+                  AND cpp.id IS NULL
+                  AND ig.id IS NULL
                 ORDER BY fe.created_at DESC
             """, (x_user_id,))
             return cur.fetchall()
+    finally:
+        conn.close()
+
+@app.post("/faces/{face_id}/ignore")
+def ignore_face(face_id: str, x_user_id: str = Header(...)):
+    """Ignore a face so it won't show up in the unassigned list"""
+    conn = get_db()
+    try:
+        ensure_ignored_faces_table(conn)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT fe.id
+                FROM face_embeddings fe
+                JOIN analysis_results ar ON ar.media_id = fe.media_id
+                WHERE fe.id = %s AND ar.owner_id = %s
+            """, (face_id, x_user_id))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Face not found")
+
+            cur.execute("""
+                INSERT INTO ignored_faces (id, owner_id, face_embedding_id)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (owner_id, face_embedding_id) DO NOTHING
+            """, (str(uuid.uuid4()), x_user_id, face_id))
+
+            cur.execute("""
+                DELETE FROM photo_persons
+                WHERE face_embedding_id = %s AND confirmed = false
+            """, (face_id,))
+
+            conn.commit()
+            return {"message": "Face ignored", "face_id": face_id}
     finally:
         conn.close()
 
@@ -154,6 +223,7 @@ def assign_face_to_person(face_id: str, data: FaceAssign, x_user_id: str = Heade
     """Assign a face to a person"""
     conn = get_db()
     try:
+        ensure_ignored_faces_table(conn)
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Verify person belongs to user
             cur.execute("SELECT id FROM persons WHERE id = %s AND owner_id = %s", 
@@ -170,12 +240,24 @@ def assign_face_to_person(face_id: str, data: FaceAssign, x_user_id: str = Heade
             
             if not result:
                 raise HTTPException(status_code=404, detail="Face not found")
-            
+
+            cur.execute("""
+                DELETE FROM ignored_faces
+                WHERE owner_id = %s AND face_embedding_id = %s
+            """, (x_user_id, face_id))
+
+            cur.execute("""
+                DELETE FROM photo_persons
+                WHERE face_embedding_id = %s AND confirmed = false
+            """, (face_id,))
+
             # Create photo-person link
             cur.execute("""
                 INSERT INTO photo_persons (id, media_id, person_id, face_embedding_id, confirmed)
                 VALUES (%s, %s, %s, %s, true)
-                ON CONFLICT (media_id, person_id) DO UPDATE SET confirmed = true
+                ON CONFLICT (media_id, person_id) DO UPDATE
+                SET face_embedding_id = EXCLUDED.face_embedding_id,
+                    confirmed = true
             """, (str(uuid.uuid4()), result['media_id'], data.person_id, face_id))
             
             conn.commit()
