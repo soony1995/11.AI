@@ -12,12 +12,15 @@ from .config import (
     AUTO_MATCH_DISTANCE_THRESHOLD,
     AUTO_MATCH_MIN_CONFIRMED,
     DATABASE_URL,
+    PROCESSING_TIMEOUT_MINUTES,
     REDIS_URL,
 )
 
 # Redis channels
 # 사진 업로드 이벤트 수신 채널
 CHANNEL_PHOTO_UPLOADED = 'photo:uploaded'
+# 사진 삭제 이벤트 수신 채널
+CHANNEL_PHOTO_DELETED = 'photo:deleted'
 # 분석 완료 이벤트 발행 채널
 CHANNEL_PHOTO_ANALYZED = 'photo:analyzed'
 
@@ -33,10 +36,13 @@ def main():
     face_detector = FaceDetector()
     exif_parser = ExifParser()
     
-    # 업로드 이벤트 채널 구독
-    pubsub.subscribe(CHANNEL_PHOTO_UPLOADED)
-    print(f"[AI Worker] Subscribed to {CHANNEL_PHOTO_UPLOADED}")
+    # 업로드/삭제 이벤트 채널 구독
+    pubsub.subscribe(CHANNEL_PHOTO_UPLOADED, CHANNEL_PHOTO_DELETED)
+    print(f"[AI Worker] Subscribed to {CHANNEL_PHOTO_UPLOADED}, {CHANNEL_PHOTO_DELETED}")
     
+    # 시작 시 오래된 PROCESSING 레코드 정리
+    db.mark_stale_processing(PROCESSING_TIMEOUT_MINUTES)
+
     # 메시지 루프: Redis pub/sub 스트림을 계속 대기/처리
     for message in pubsub.listen():
         # 구독 확인/핵심 이벤트 이외 메시지는 무시
@@ -44,12 +50,23 @@ def main():
             continue
             
         try:
+            # 새 메시지마다 오래된 PROCESSING 레코드 정리
+            db.mark_stale_processing(PROCESSING_TIMEOUT_MINUTES)
+
             # 이벤트 payload 파싱
             payload = json.loads(message['data'])
+            channel = message.get('channel')
+            if isinstance(channel, bytes):
+                channel = channel.decode()
             media_id = payload['id']
             owner_id = payload['ownerId']
             stored_key = payload['storedKey']
-            
+
+            if channel == CHANNEL_PHOTO_DELETED or payload.get('action') == 'deleted':
+                print(f"[AI Worker] Deleting AI records: {media_id}")
+                db.delete_media_records(media_id)
+                continue
+
             print(f"[AI Worker] Processing: {media_id}")
             
             # 분석 레코드 생성 및 상태 갱신

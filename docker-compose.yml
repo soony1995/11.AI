@@ -36,6 +36,11 @@ services:
       MINIO_ACCESS_KEY: minio
       MINIO_SECRET_KEY: minio123
       MINIO_BUCKET: media-uploads
+      FACE_MODEL: cnn
+      FACE_UPSAMPLE: 0
+      FACE_MAX_DIM: 1200
+      FACE_FALLBACK_MODEL: hog
+      PROCESSING_TIMEOUT_MINUTES: 20
       PYTHONUNBUFFERED: "1"
     depends_on:
       ai-postgres:

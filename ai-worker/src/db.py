@@ -65,6 +65,29 @@ class Database:
                 WHERE media_id = %s
             """, (error_message, media_id))
             self.conn.commit()
+
+    def delete_media_records(self, media_id: str):
+        """Delete all AI metadata for a media id"""
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM photo_persons WHERE media_id = %s", (media_id,))
+            cur.execute("DELETE FROM face_embeddings WHERE media_id = %s", (media_id,))
+            cur.execute("DELETE FROM analysis_results WHERE media_id = %s", (media_id,))
+            self.conn.commit()
+
+    def mark_stale_processing(self, max_age_minutes: int):
+        """Mark 오래된 PROCESSING 레코드를 FAILED로 전환"""
+        if max_age_minutes <= 0:
+            return
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                UPDATE analysis_results
+                SET status = 'FAILED',
+                    error_message = COALESCE(error_message, 'Processing timeout'),
+                    updated_at = NOW()
+                WHERE status = 'PROCESSING'
+                  AND updated_at < NOW() - (%s || ' minutes')::interval
+            """, (max_age_minutes,))
+            self.conn.commit()
     
     def save_face_embedding(self, media_id: str, embedding: list, 
                             bbox: dict, person_id: str = None) -> str:
